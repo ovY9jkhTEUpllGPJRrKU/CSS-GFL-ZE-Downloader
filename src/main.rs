@@ -1,17 +1,18 @@
 pub mod bz2_file;
+use crossbeam::channel;
 use error_chain::error_chain;
-use rayon::iter::*;
-
+use rayon::{iter::*, Scope};
 use select::{document::Document, predicate::Name};
+use url::{Position, Url};
+use walkdir::{DirEntry, WalkDir};
+
 use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File},
     io::Write,
-    sync::Mutex,
+    sync::{mpsc, Arc, Mutex},
     time::Instant,
 };
-use url::{Position, Url};
-use walkdir::{DirEntry, WalkDir};
 
 const KB_SIZE: usize = 1024;
 const MB_SIZE: usize = KB_SIZE * KB_SIZE;
@@ -37,12 +38,18 @@ fn get_base_url(url: &Url, doc: &Document) -> Result<Url> {
 ///
 /// # Arguments
 /// * `dl_url`      A &str which is the fastdl url
-fn scrape_web(dl_url: &str) -> Result<()> {
+fn scrape_web<'a>(dl_url: &str) -> Result<()> {
+    let (tx, rx) = channel::unbounded();
+
+    // `head` is used to perform HEADER req
+    let head = reqwest::blocking::Client::new();
+
     // Store the links that will be downloaded
-    let mut download_links = Vec::<String>::new();
+    let download_links = Arc::new(Mutex::new(Vec::<String>::new()));
     // Stores the links that were visited
-    let mut visited_paths = HashSet::<String>::new();
-    let mut unvisited_paths = VecDeque::<String>::new();
+    let visited_paths = Arc::new(Mutex::new(HashSet::<String>::new()));
+
+    // let mut unvisited_paths = VecDeque::<String>::new();
 
     // Parent directory of `dl_url`
     let parent_dir_url_1 = Url::parse(format!("{}{}", dl_url, "..").as_str())?
@@ -63,88 +70,110 @@ fn scrape_web(dl_url: &str) -> Result<()> {
     let base_url = get_base_url(&dl_url, &temp_doc)?;
 
     // Visited links should include the parent directory and the `base_url`
-    visited_paths.insert(String::from("/"));
-    visited_paths.insert(parent_dir_url_1);
-    visited_paths.insert(parent_dir_url_2);
+    visited_paths.lock().unwrap().insert(String::from("/"));
+    visited_paths.lock().unwrap().insert(parent_dir_url_1);
+    visited_paths.lock().unwrap().insert(parent_dir_url_2);
 
     // Store the path we will first visit
-    unvisited_paths.push_front(dl_url.path().to_string());
+    // unvisited_paths.push_front(dl_url.path().to_string());
 
-    // `head` is used to perform HEADER req
-    let head = reqwest::blocking::Client::new();
+    tx.send(dl_url.path().to_string()).unwrap();
 
-    while !unvisited_paths.is_empty() {
-        // Grab the first object stored in queue
-        let curr_path = unvisited_paths.pop_back().unwrap();
-        // fastdl parent directory link results in no suffix "/" character
-        // Check reason on passing in `parent_dir_url_2` into `visited_paths` HashSet
-        let curr_path_alt = {
-            let mut temp_chars = curr_path.chars();
-            temp_chars.next_back();
-            temp_chars.as_str().to_string()
-        };
+    crossbeam_utils::thread::scope(|s| {
+        // for curr_path in rx.iter() {
+        rx.iter().for_each(|curr_path| {
+            s.spawn(|_| {
+                let curr_path = String::from(curr_path);
+                // let visited_paths_clone = Arc::clone(&visited_paths);
+                // let download_links_clone = Arc::clone(&download_links);
+                // Grab the first object stored in queue
+                // let curr_path = unvisited_paths.pop_back().unwrap();
+                // fastdl parent directory link results in no suffix "/" character
+                // Check reason on passing in `parent_dir_url_2` into `visited_paths` HashSet
+                let curr_path_alt = {
+                    let mut temp_chars = curr_path.chars();
+                    temp_chars.next_back();
+                    temp_chars.as_str().to_string()
+                };
 
-        // Add `curr_path` as a visited link
-        visited_paths.insert(curr_path.clone());
-        visited_paths.insert(curr_path_alt);
+                // Add `curr_path` as a visited link
+                visited_paths.lock().unwrap().insert(curr_path.clone());
+                visited_paths.lock().unwrap().insert(curr_path_alt);
 
-        // Create a url out of the `dl_url` &str
-        let url = base_url.join(curr_path.as_str())?;
+                // Create a url out of the `dl_url` &str
+                let url = base_url.join(curr_path.as_str()).unwrap();
 
-        // GET Request containing all the links to recursively traverse
-        let req = reqwest::blocking::get(url.as_str())?.text()?;
+                // GET Request containing all the links to recursively traverse
+                let req = reqwest::blocking::get(url.as_str())
+                    .unwrap()
+                    .text()
+                    .unwrap();
 
-        // Iterate through the list of websites in `url`, parsing only the links (dir/files)
-        Document::from(req.as_str())
-            .find(Name("a"))
-            .filter_map(|n| n.attr("href"))
-            .for_each(|x| {
-                // Send HEADER requests (faster than GET) and parse in the format:
-                // {scheme}://{domain}/{path}
-                // Note: `path` includes a prepended / in the assignment of`next_site`
-                let new_url = url.join(x).unwrap();
-                let header = head.post(new_url).send().unwrap();
-                let scheme = header.url().scheme();
-                let domain = header.url().host_str().unwrap();
-                let path = header.url().path();
-                let next_site = format!("{scheme}://{domain}{path}");
+                // Iterate through the list of websites in `url`, parsing only the links (dir/files)
+                Document::from(req.as_str())
+                    .find(Name("a"))
+                    .filter_map(|n| n.attr("href"))
+                    .for_each(|x| {
+                        // Send HEADER requests (faster than GET) and parse in the format:
+                        // {scheme}://{domain}/{path}
+                        // Note: `path` includes a prepended / in the assignment of`next_site`
+                        let new_url = url.join(x).unwrap();
+                        let header = head.post(new_url).send().unwrap();
+                        let scheme = header.url().scheme();
+                        let domain = header.url().host_str().unwrap();
+                        let path = header.url().path();
+                        let next_site = format!("{scheme}://{domain}{path}");
 
-                // Append the paths we have not visited
-                // Conditions:
-                //  1. Set contains a visited path
-                //  2. String contains "index.html"
-                //  3. String contains ".tmp"
-                //  4. String contains ".ztmp"
-                if !visited_paths.contains(path)
-                    && !path.contains("index.html")
-                    && !path.contains(".tmp")
-                    && !path.contains(".ztmp")
-                {
-                    // DEBUG: Print the header information
-                    // println!("{}", "=".repeat(SEP_LEN));
-                    // println!("\nDomain: {}", domain);
-                    // println!("Path: {}", path);
-                    // println!("Download Link: {}\n", next_site);
-                    // println!("{}", "=".repeat(SEP_LEN));
+                        // Append the paths we have not visited
+                        // Conditions:
+                        //  1. Set contains a visited path
+                        //  2. String contains "index.html"
+                        //  3. String contains ".tmp"
+                        //  4. String contains ".ztmp"
+                        if !visited_paths.lock().unwrap().contains(path)
+                            && !path.contains("index.html")
+                            && !path.contains(".tmp")
+                            && !path.contains(".ztmp")
+                        {
+                            // DEBUG: Print the header information
+                            // println!("{}", "=".repeat(SEP_LEN));
+                            // println!("\nDomain: {}", domain);
+                            // println!("Path: {}", path);
+                            // println!("Download Link: {}\n", next_site);
+                            // println!("{}", "=".repeat(SEP_LEN));
 
-                    if !path.contains("gflfastdlv2") {
-                        // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
-                        unvisited_paths.push_front(path.to_string());
-                    } else {
-                        // Only add "fastdlv2" in our `download_links` Vec
-                        download_links.push(next_site);
-                    }
-                }
+                            if !path.contains("gflfastdlv2") {
+                                // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
+                                // unvisited_paths.push_front(path.to_string());
+                                tx.send(path.to_string()).unwrap();
+                            } else {
+                                // Only add "fastdlv2" in our `download_links` Vec
+                                download_links.lock().unwrap().push(next_site);
+                            }
+                        }
+                    });
+
+                // DEBUG: Print out the status of every iteration of the loop
+                println!("{}\n", "=".repeat(SEP_LEN));
+                println!("Status:");
+                println!("Visited Paths:\t\t{}", visited_paths.lock().unwrap().len());
+                println!("Unvisited Paths:\t{}", rx.len());
+                // println!("Unvisited Paths:\t{}", unvisited_paths.len());
+                println!(
+                    "Downloadable Links:\t{}\n",
+                    download_links.lock().unwrap().len()
+                );
+                println!("{}\n", "=".repeat(SEP_LEN));
             });
 
-        // DEBUG: Print out the status of every iteration of the loop
-        println!("{}\n", "=".repeat(SEP_LEN));
-        println!("Status:");
-        println!("Visited Paths:\t\t{}", visited_paths.len());
-        println!("Unvisited Paths:\t{}", unvisited_paths.len());
-        println!("Downloadable Links:\t{}\n", download_links.len());
-        println!("{}\n", "=".repeat(SEP_LEN));
-    }
+            println!("rx len:\t\t{}", rx.len());
+        });
+
+        // if rx.is_empty() {
+        println!("rx is empty: {}", rx.len());
+        // }
+    })
+    .unwrap();
 
     Ok(())
 }
