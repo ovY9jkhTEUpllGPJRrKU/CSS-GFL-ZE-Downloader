@@ -1,7 +1,6 @@
 pub mod bz2_file;
-use crossbeam::channel;
 use error_chain::error_chain;
-use rayon::{iter::*, Scope};
+use rayon::iter::*;
 use select::{document::Document, predicate::Name};
 use url::{Position, Url};
 use walkdir::{DirEntry, WalkDir};
@@ -10,7 +9,7 @@ use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File},
     io::Write,
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -39,12 +38,11 @@ fn get_base_url(url: &Url, doc: &Document) -> Result<Url> {
 /// # Arguments
 /// * `dl_url`      A &str which is the fastdl url
 fn scrape_web<'a>(dl_url: &str) -> Result<()> {
-    // let (tx, rx) = channel::unbounded();
-
     // Store the links that will be downloaded
     let download_links = Arc::new(Mutex::new(HashSet::<String>::new()));
     // Stores the links that were visited
     let visited_paths = Arc::new(Mutex::new(HashSet::<String>::new()));
+    // Stores the paths that were not visited
     let unvisited_paths = Mutex::new(VecDeque::<String>::new());
 
     // Parent directory of `dl_url`
@@ -90,14 +88,12 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
         let unvisited_len = unvisited_paths.lock().unwrap().len();
 
         // Iterate through every item in the directory
-        for idx in 0..unvisited_len {
+        for _ in 0..unvisited_len {
             let curr_path = unvisited_paths.lock().unwrap().pop_back().unwrap();
-            println!("[{idx}] {curr_path}");
+            // let curr_path = String::from(curr_path);
 
             // Move to the next path if it was already visited
             if visited_paths.lock().unwrap().contains(curr_path.as_str()) {
-                unvisited_paths.lock().unwrap().pop_back();
-
                 continue;
             }
 
@@ -110,7 +106,7 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
             let head = reqwest::blocking::Client::new();
 
             let t = std::thread::spawn(move || {
-                let mut new_paths = VecDeque::new();
+                let new_paths = Arc::new(Mutex::new(VecDeque::new()));
 
                 // fastdl parent directory link results in no suffix "/" character
                 let curr_path_alt = {
@@ -136,47 +132,53 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                     .unwrap();
 
                 // Iterate through the list of websites in `url`, parsing only the links (dir/files)
-                Document::from(req.as_str())
+                let curr_path_links = Document::from(req.as_str())
                     .find(Name("a"))
                     .filter_map(|n| n.attr("href"))
-                    .for_each(|x| {
-                        // Send HEADER requests (faster than GET) and parse in the format:
-                        // {scheme}://{domain}/{path}
-                        // Note: `path` includes a prepended / in the assignment of`next_site`
-                        let new_url = url.join(x).unwrap();
-                        let header = head.post(new_url).send().unwrap();
-                        let scheme = header.url().scheme();
-                        let domain = header.url().host_str().unwrap();
-                        let path = header.url().path();
-                        let next_site = format!("{scheme}://{domain}{path}");
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>();
 
-                        // Append the paths we have not visited
-                        // Conditions:
-                        //  1. Set contains a visited path
-                        //  2. String contains "index.html"
-                        //  3. String contains ".tmp"
-                        //  4. String contains ".ztmp"
-                        if !visited_paths_clone.lock().unwrap().contains(path)
-                            && !path.contains("index.html")
-                            && !path.contains(".tmp")
-                            && !path.contains(".ztmp")
-                        {
-                            // DEBUG: Print the header information
-                            // println!("{}", "=".repeat(SEP_LEN));
-                            // println!("\nDomain: {}", domain);
-                            // println!("Path: {}", path);
-                            // println!("Download Link: {}\n", next_site);
-                            // println!("{}", "=".repeat(SEP_LEN));
+                let curr_path_links_clone = curr_path_links.clone();
+                let new_paths_clone = Arc::clone(&new_paths);
 
-                            if !path.contains("gflfastdlv2") {
-                                // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
-                                new_paths.push_front(path.to_string());
-                            } else {
-                                // Only add "fastdlv2" in our `download_links` Vec
-                                download_links_clone.lock().unwrap().insert(next_site);
-                            }
+                curr_path_links_clone.par_iter().for_each(|x| {
+                    // Send HEADER requests (faster than GET) and parse in the format:
+                    // {scheme}://{domain}/{path}
+                    // Note: `path` includes a prepended / in the assignment of`next_site`
+                    let new_url = url.join(x).unwrap();
+                    let header = head.post(new_url).send().unwrap();
+                    let scheme = header.url().scheme();
+                    let domain = header.url().host_str().unwrap();
+                    let path = header.url().path();
+                    let next_site = format!("{scheme}://{domain}{path}");
+
+                    // Append the paths we have not visited
+                    // Conditions:
+                    //  1. Set contains a visited path
+                    //  2. String contains "index.html"
+                    //  3. String contains ".tmp"
+                    //  4. String contains ".ztmp"
+                    if !visited_paths_clone.lock().unwrap().contains(path)
+                        && !path.contains("index.html")
+                        && !path.contains(".tmp")
+                        && !path.contains(".ztmp")
+                    {
+                        // DEBUG: Print the header information
+                        // println!("{}", "=".repeat(SEP_LEN));
+                        // println!("\nDomain: {}", domain);
+                        // println!("Path: {}", path);
+                        // println!("Download Link: {}\n", next_site);
+                        // println!("{}", "=".repeat(SEP_LEN));
+
+                        if !path.contains("gflfastdlv2") {
+                            // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
+                            new_paths_clone.lock().unwrap().push_front(path.to_string());
+                        } else {
+                            // Only add "fastdlv2" in our `download_links` Vec
+                            download_links_clone.lock().unwrap().insert(next_site);
                         }
-                    });
+                    }
+                });
 
                 // DEBUG: Print out the status of every iteration of the loop
                 println!("{}\n", "=".repeat(SEP_LEN));
@@ -198,15 +200,16 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
             handler.push(t);
         }
 
-        // Join all all threads, then append all the vectors into the vectors
-        for t in handler.into_iter() {
-            let mut unvisited_vec_thread = t.join().unwrap();
+        // Join all threads, then append all the vectors into the vectors
+        handler.into_iter().for_each(|t| {
+            let mut unvisited_vec_thread = t.join().unwrap().lock().unwrap().to_owned();
 
+            // Append new links to the unvisited path
             unvisited_paths
                 .lock()
                 .unwrap()
                 .append(&mut unvisited_vec_thread);
-        }
+        });
     }
 
     Ok(())
@@ -288,7 +291,7 @@ fn main() -> Result<()> {
 
     // Grabs all the bz2 files and decodes them, making bsp files
     // Then, the bz2 files are deleted, keeping only the bsp files
-    // decode_files();
+    decode_files();
 
     println!("\n{}", "=".repeat(25));
     println!("Time: {}", timer.elapsed().as_secs_f32());
