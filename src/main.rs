@@ -38,6 +38,10 @@ fn get_base_url(url: &Url, doc: &Document) -> Result<Url> {
 /// # Arguments
 /// * `dl_url`      A &str which is the fastdl url
 fn scrape_web<'a>(dl_url: &str) -> Result<()> {
+    println!("{}", term_cursor::Clear);
+    println!("{}{}\n", term_cursor::Goto(0, 0), "=".repeat(SEP_LEN));
+    println!("{}{}\n", term_cursor::Goto(0, 6), "=".repeat(SEP_LEN));
+
     // Store the links that will be downloaded
     let download_links = Arc::new(Mutex::new(HashSet::<String>::new()));
     // Stores the links that were visited
@@ -89,14 +93,16 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
 
         // Iterate through every item in the directory
         for _ in 0..unvisited_len {
+            // Pop the last visited object in the path
             let curr_path = unvisited_paths.lock().unwrap().pop_back().unwrap();
             // let curr_path = String::from(curr_path);
 
-            // Move to the next path if it was already visited
+            // Move to the next path if the link was visited was already visited
             if visited_paths.lock().unwrap().contains(curr_path.as_str()) {
                 continue;
             }
 
+            // Clone the `visited_paths` and `download_links` for parallel storing of paths/links
             let visited_paths_clone = Arc::clone(&visited_paths);
             let download_links_clone = Arc::clone(&download_links);
 
@@ -105,10 +111,13 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
             // `head` is used to perform HEADER req
             let head = reqwest::blocking::Client::new();
 
+            // Create a thread for each path (file/dir) to visit
             let t = std::thread::spawn(move || {
+                // Used to join the threads together to prevent race conditions with the function terminating too early
                 let new_paths = Arc::new(Mutex::new(VecDeque::new()));
 
                 // fastdl parent directory link results in no suffix "/" character
+                // Adding the `curr_path` without the suffix "/" is the same reasoning as above
                 let curr_path_alt = {
                     let mut temp_chars = curr_path.chars();
                     temp_chars.next_back();
@@ -121,6 +130,12 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                     .unwrap()
                     .insert(curr_path.clone());
                 visited_paths_clone.lock().unwrap().insert(curr_path_alt);
+
+                println!(
+                    "{}Visited Paths:\t\t{}",
+                    term_cursor::Goto(0, 2),
+                    visited_paths_clone.lock().unwrap().len()
+                );
 
                 // Create a url out of the `dl_url` &str
                 let url = base_url.join(curr_path.as_str()).unwrap();
@@ -163,36 +178,25 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                         && !path.contains(".tmp")
                         && !path.contains(".ztmp")
                     {
-                        // DEBUG: Print the header information
-                        // println!("{}", "=".repeat(SEP_LEN));
-                        // println!("\nDomain: {}", domain);
-                        // println!("Path: {}", path);
-                        // println!("Download Link: {}\n", next_site);
-                        // println!("{}", "=".repeat(SEP_LEN));
-
                         if !path.contains("gflfastdlv2") {
                             // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
                             new_paths_clone.lock().unwrap().push_front(path.to_string());
                         } else {
                             // Only add "fastdlv2" in our `download_links` Vec
+                            println!("{}{next_site}{}", term_cursor::Goto(0, 4), " ".repeat(30));
+
                             download_links_clone.lock().unwrap().insert(next_site);
+
+                            println!(
+                                "{}Downloadable Links:\t{}",
+                                term_cursor::Goto(0, 3),
+                                download_links_clone.lock().unwrap().len()
+                            );
                         }
                     }
                 });
 
-                // DEBUG: Print out the status of every iteration of the loop
-                println!("{}\n", "=".repeat(SEP_LEN));
-                println!("Status:");
-                println!(
-                    "Visited Paths:\t\t{}",
-                    visited_paths_clone.lock().unwrap().len()
-                );
-                println!(
-                    "Downloadable Links:\t{}\n",
-                    download_links_clone.lock().unwrap().len()
-                );
-                println!("{}\n", "=".repeat(SEP_LEN));
-
+                // Each thread will return a Vec of all the links to its directory
                 return new_paths;
             });
 
@@ -201,7 +205,7 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
         }
 
         // Join all threads, then append all the vectors into the vectors
-        handler.into_iter().for_each(|t| {
+        for t in handler {
             let mut unvisited_vec_thread = t.join().unwrap().lock().unwrap().to_owned();
 
             // Append new links to the unvisited path
@@ -209,8 +213,11 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                 .lock()
                 .unwrap()
                 .append(&mut unvisited_vec_thread);
-        });
+        }
     }
+
+    println!("{}{}", term_cursor::Goto(0, 4), " ".repeat(170));
+    println!("{}", term_cursor::Goto(0, 8));
 
     Ok(())
 }
@@ -285,8 +292,12 @@ fn main() -> Result<()> {
     let timer = Instant::now();
 
     // Parse through the Fastdl site
-    scrape_web(r"https://fastdl.gflclan.com/cstrike/materials/").unwrap();
-    // scrape_web(r"https://fastdl.gflclan.com/cstrike/").unwrap();
+    // scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
+    // scrape_web(r"https://fastdl.gflclan.com/cstrike/materials/").unwrap();
+    // scrape_web(r"https://fastdl.gflclan.com/cstrike/models/").unwrap();
+    // scrape_web(r"https://fastdl.gflclan.com/cstrike/resource/").unwrap();
+    // scrape_web(r"https://fastdl.gflclan.com/cstrike/sound/").unwrap();
+    scrape_web(r"https://fastdl.gflclan.com/cstrike/").unwrap();
     // r"https://fastdl.gflclan.com/cstrike/";
 
     // Grabs all the bz2 files and decodes them, making bsp files
