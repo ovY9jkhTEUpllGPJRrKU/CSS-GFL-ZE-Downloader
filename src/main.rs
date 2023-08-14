@@ -39,17 +39,13 @@ fn get_base_url(url: &Url, doc: &Document) -> Result<Url> {
 /// # Arguments
 /// * `dl_url`      A &str which is the fastdl url
 fn scrape_web<'a>(dl_url: &str) -> Result<()> {
-    let (tx, rx) = channel::unbounded();
-
-    // `head` is used to perform HEADER req
-    let head = reqwest::blocking::Client::new();
+    // let (tx, rx) = channel::unbounded();
 
     // Store the links that will be downloaded
-    let download_links = Arc::new(Mutex::new(Vec::<String>::new()));
+    let download_links = Arc::new(Mutex::new(HashSet::<String>::new()));
     // Stores the links that were visited
     let visited_paths = Arc::new(Mutex::new(HashSet::<String>::new()));
-
-    // let mut unvisited_paths = VecDeque::<String>::new();
+    let unvisited_paths = Mutex::new(VecDeque::<String>::new());
 
     // Parent directory of `dl_url`
     let parent_dir_url_1 = Url::parse(format!("{}{}", dl_url, "..").as_str())?
@@ -63,33 +59,60 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
         temp_chars.as_str().to_string()
     };
 
-    // Get the `base_url` of `dl_url`
-    let temp_req = reqwest::blocking::get(dl_url)?.text()?;
-    let temp_doc = Document::from(temp_req.as_str());
-    let dl_url = Url::parse(dl_url)?;
-    let base_url = get_base_url(&dl_url, &temp_doc)?;
-
     // Visited links should include the parent directory and the `base_url`
     visited_paths.lock().unwrap().insert(String::from("/"));
     visited_paths.lock().unwrap().insert(parent_dir_url_1);
     visited_paths.lock().unwrap().insert(parent_dir_url_2);
 
+    // Get the `base_url` of `dl_url`
+    let temp_req = reqwest::blocking::get(dl_url)?.text()?;
+    let temp_doc = Document::from(temp_req.as_str());
+    let dl_url = Url::parse(dl_url)?;
+
     // Store the path we will first visit
-    // unvisited_paths.push_front(dl_url.path().to_string());
+    unvisited_paths
+        .lock()
+        .unwrap()
+        .push_front(dl_url.path().to_string());
 
-    tx.send(dl_url.path().to_string()).unwrap();
+    // Iterate through every directory
+    loop {
+        // Base case: All paths/links have been visited
+        if unvisited_paths.lock().unwrap().is_empty() {
+            break;
+        }
 
-    crossbeam_utils::thread::scope(|s| {
-        // for curr_path in rx.iter() {
-        rx.iter().for_each(|curr_path| {
-            s.spawn(|_| {
-                let curr_path = String::from(curr_path);
-                // let visited_paths_clone = Arc::clone(&visited_paths);
-                // let download_links_clone = Arc::clone(&download_links);
-                // Grab the first object stored in queue
-                // let curr_path = unvisited_paths.pop_back().unwrap();
+        // Thread handler which will join all threads (synchronize)
+        let mut handler = Vec::new();
+        // Iterate through every item
+        //      Length is obtained because we don't want to deadlock
+        //      and it's possible to get a runtime error
+        let unvisited_len = unvisited_paths.lock().unwrap().len();
+
+        // Iterate through every item in the directory
+        for idx in 0..unvisited_len {
+            let curr_path = unvisited_paths.lock().unwrap().pop_back().unwrap();
+            println!("[{idx}] {curr_path}");
+
+            // Move to the next path if it was already visited
+            if visited_paths.lock().unwrap().contains(curr_path.as_str()) {
+                unvisited_paths.lock().unwrap().pop_back();
+
+                continue;
+            }
+
+            let visited_paths_clone = Arc::clone(&visited_paths);
+            let download_links_clone = Arc::clone(&download_links);
+
+            // Get the `base_url` of `dl_url`
+            let base_url = get_base_url(&dl_url, &temp_doc)?;
+            // `head` is used to perform HEADER req
+            let head = reqwest::blocking::Client::new();
+
+            let t = std::thread::spawn(move || {
+                let mut new_paths = VecDeque::new();
+
                 // fastdl parent directory link results in no suffix "/" character
-                // Check reason on passing in `parent_dir_url_2` into `visited_paths` HashSet
                 let curr_path_alt = {
                     let mut temp_chars = curr_path.chars();
                     temp_chars.next_back();
@@ -97,8 +120,11 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                 };
 
                 // Add `curr_path` as a visited link
-                visited_paths.lock().unwrap().insert(curr_path.clone());
-                visited_paths.lock().unwrap().insert(curr_path_alt);
+                visited_paths_clone
+                    .lock()
+                    .unwrap()
+                    .insert(curr_path.clone());
+                visited_paths_clone.lock().unwrap().insert(curr_path_alt);
 
                 // Create a url out of the `dl_url` &str
                 let url = base_url.join(curr_path.as_str()).unwrap();
@@ -130,7 +156,7 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                         //  2. String contains "index.html"
                         //  3. String contains ".tmp"
                         //  4. String contains ".ztmp"
-                        if !visited_paths.lock().unwrap().contains(path)
+                        if !visited_paths_clone.lock().unwrap().contains(path)
                             && !path.contains("index.html")
                             && !path.contains(".tmp")
                             && !path.contains(".ztmp")
@@ -144,11 +170,10 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
 
                             if !path.contains("gflfastdlv2") {
                                 // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
-                                // unvisited_paths.push_front(path.to_string());
-                                tx.send(path.to_string()).unwrap();
+                                new_paths.push_front(path.to_string());
                             } else {
                                 // Only add "fastdlv2" in our `download_links` Vec
-                                download_links.lock().unwrap().push(next_site);
+                                download_links_clone.lock().unwrap().insert(next_site);
                             }
                         }
                     });
@@ -156,24 +181,33 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                 // DEBUG: Print out the status of every iteration of the loop
                 println!("{}\n", "=".repeat(SEP_LEN));
                 println!("Status:");
-                println!("Visited Paths:\t\t{}", visited_paths.lock().unwrap().len());
-                println!("Unvisited Paths:\t{}", rx.len());
-                // println!("Unvisited Paths:\t{}", unvisited_paths.len());
+                println!(
+                    "Visited Paths:\t\t{}",
+                    visited_paths_clone.lock().unwrap().len()
+                );
                 println!(
                     "Downloadable Links:\t{}\n",
-                    download_links.lock().unwrap().len()
+                    download_links_clone.lock().unwrap().len()
                 );
                 println!("{}\n", "=".repeat(SEP_LEN));
+
+                return new_paths;
             });
 
-            println!("rx len:\t\t{}", rx.len());
-        });
+            // Append all threads that are traversing the directory
+            handler.push(t);
+        }
 
-        // if rx.is_empty() {
-        println!("rx is empty: {}", rx.len());
-        // }
-    })
-    .unwrap();
+        // Join all all threads, then append all the vectors into the vectors
+        for t in handler.into_iter() {
+            let mut unvisited_vec_thread = t.join().unwrap();
+
+            unvisited_paths
+                .lock()
+                .unwrap()
+                .append(&mut unvisited_vec_thread);
+        }
+    }
 
     Ok(())
 }
