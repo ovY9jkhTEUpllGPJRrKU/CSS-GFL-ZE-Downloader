@@ -18,6 +18,8 @@ use std::{
 const KB_SIZE: usize = 1024;
 const MB_SIZE: usize = KB_SIZE * KB_SIZE;
 const SEP_LEN: usize = 50;
+const POST_MSG_REPLACE: usize = 70;
+const REDIRECT_LINK: &str = "gflfastdlv2";
 
 error_chain! {
     foreign_links {
@@ -40,9 +42,8 @@ fn get_base_url(url: &Url, doc: &Document) -> Result<Url> {
 /// # Arguments
 /// * `dl_url`      A &str which is the fastdl url
 fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
-    println!("{}", term_cursor::Clear);
-    println!("{}{}\n", term_cursor::Goto(0, 0), "=".repeat(SEP_LEN));
-    println!("{}{}\n", term_cursor::Goto(0, 6), "=".repeat(SEP_LEN));
+    // println!("{}{}\n", term_cursor::Goto(0, 1), "=".repeat(SEP_LEN));
+    // println!("{}{}\n", term_cursor::Goto(0, 7), "=".repeat(SEP_LEN));
 
     // Store the links that will be downloaded
     let download_links = Arc::new(RwLock::new(HashSet::<String>::new()));
@@ -135,7 +136,7 @@ fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
 
                 println!(
                     "{}Visited Paths:\t\t{}",
-                    term_cursor::Goto(0, 2),
+                    term_cursor::Goto(0, 3),
                     visited_paths_clone.lock().unwrap().len()
                 );
 
@@ -158,6 +159,8 @@ fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
                 let curr_path_links_clone = curr_path_links.clone();
                 let new_paths_clone = Arc::clone(&new_paths);
 
+                // Iterate through all the url links and add the list to a checkable path if it was not seen
+                // If the url link is a downloadable link, the url link will be added to `download_links`
                 curr_path_links_clone.par_iter().for_each(|x| {
                     // Send HEADER requests (faster than GET) and parse in the format:
                     // {scheme}://{domain}/{path}
@@ -180,20 +183,25 @@ fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
                         && !path.contains(".tmp")
                         && !path.contains(".ztmp")
                     {
-                        if !path.contains("gflfastdlv2") {
+                        if !path.contains(REDIRECT_LINK) {
                             // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
                             new_paths_clone.lock().unwrap().push_front(path.to_string());
-                        } else if path.contains("gflfastdlv2") && !path.ends_with("/") {
+                        } else if path.contains(REDIRECT_LINK) && !path.ends_with("/") {
                             // Only add "fastdlv2" in our `download_links` Vec
                             // Second case ensures that the fastdlv2 directories are not being recursed as well
                             // I'm not sure why there are links to the directories
-                            print!("{}{next_site}{}", term_cursor::Goto(0, 4), " ".repeat(70));
+                            print!(
+                                "{}{}{}",
+                                term_cursor::Goto(0, 5),
+                                next_site,
+                                " ".repeat(POST_MSG_REPLACE)
+                            );
 
                             download_links_clone.write().unwrap().insert(next_site);
 
                             println!(
                                 "{}Downloadable Links:\t{}",
-                                term_cursor::Goto(0, 3),
+                                term_cursor::Goto(0, 4),
                                 download_links_clone.write().unwrap().len()
                             );
                         }
@@ -208,7 +216,7 @@ fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
             handler.push(t);
         }
 
-        // Join all threads, then append all the vectors into the vectors
+        // Join all threads, then append all the vectors into the vectors (thread-safety)
         for t in handler {
             let mut unvisited_vec_thread = t.join().unwrap().lock().unwrap().to_owned();
 
@@ -220,19 +228,21 @@ fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
         }
     }
 
-    // println!("{}", term_cursor::Goto(0, 4));
-    println!("{}{}", term_cursor::Goto(0, 4), " ".repeat(170));
-    println!("{}", term_cursor::Goto(0, 8));
+    // Clear the list of files/paths that were checked
+    println!("{}{}", term_cursor::Goto(0, 5), " ".repeat(170));
+    // println!("{}", term_cursor::Goto(0, 8));
 
     Ok(download_links)
 }
 
+/// Downloads all the files in `dl_links`
+/// Create directories inside of the current directory for the path of the file if it does not exist
+///
+/// # Arguments
+/// `dl_links`      HashSet that contains all the download links that will be downloaded and stored
 fn download_files(dl_links: &Arc<RwLock<HashSet<String>>>) {
     let idx = Mutex::new(0);
     let curr_path = std::env::current_dir().unwrap();
-
-    // Force 2 threads on download
-    let visited_paths = Mutex::new(HashSet::<String>::new());
 
     // Use regex to obtain the directory path and file name
     let dl_url_paths = |dl_url: &str| -> (PathBuf, PathBuf) {
@@ -252,45 +262,47 @@ fn download_files(dl_links: &Arc<RwLock<HashSet<String>>>) {
 
     // Iterate and get all the paths that are visited
     dl_links.read().unwrap().par_iter().for_each(|dl_url| {
-        // TODO
+        // Get PathBufs of the file and its directory
         let (dir_path, file_path) = dl_url_paths(dl_url);
+
+        // Track our item status and info (You can disable and it may improve runtime)
+        *idx.lock().unwrap() += 1;
+
+        print!(
+            "
+{}[ {} / {} ]
+{}Link:\t\t\t{}{}
+{}File:\t\t\t{}{}
+{}Dir:\t\t\t{}{}",
+            // Total Left Params
+            term_cursor::Goto(0, 10),
+            idx.lock().unwrap(),
+            dl_links.read().unwrap().len(),
+            // Link Params
+            term_cursor::Goto(0, 11),
+            dl_url,
+            " ".repeat(POST_MSG_REPLACE),
+            // Capture Params
+            term_cursor::Goto(0, 12),
+            file_path.to_str().unwrap(),
+            " ".repeat(POST_MSG_REPLACE),
+            // Dir Params
+            term_cursor::Goto(0, 13),
+            dir_path.to_str().unwrap(),
+            " ".repeat(POST_MSG_REPLACE),
+        );
 
         // Recursively create directories to the folders we want to search
-
-        if !visited_paths
-            .lock()
-            .unwrap()
-            .insert(dir_path.to_str().unwrap().to_string())
-        {
-            std::fs::create_dir_all(dir_path).unwrap();
-        }
-    });
-
-    // Iterate and download all files with parallelization
-    dl_links.read().unwrap().par_iter().for_each(|dl_url| {
-        let (dir_path, file_path) = dl_url_paths(dl_url);
+        std::fs::create_dir_all(dir_path).unwrap();
 
         // Get request the file link and store it in the directory path
         let bytes = reqwest::blocking::get(dl_url).unwrap().bytes().unwrap();
-
-        // Track our item amount (You can disable and it may improve runtime)
-        *idx.lock().unwrap() += 1;
-
-        println!(
-            "[ {} / {} ] Link:\t{}
-Capture:\t\t{}
-File:\t\t\t{}\n",
-            idx.lock().unwrap(),
-            dl_links.read().unwrap().len(),
-            dl_url,
-            file_path.to_str().unwrap(),
-            dir_path.to_str().unwrap()
-        );
-
         File::create(file_path).unwrap().write_all(&bytes).unwrap();
     });
 }
 
+/// Decodes all bz2 files in the current directory by recursively searching through all the paths
+/// After all paths are decoded, the original bz2 files are deleted
 fn decode_files() {
     // Recursively collect files ending with .bz2
     let dirs = WalkDir::new(".")
@@ -302,11 +314,11 @@ fn decode_files() {
     let cmp_dir_size = Mutex::<usize>::new(0);
 
     // Print all the bz2 files that will be decoded
-    dirs.par_iter()
-        .for_each(|f| println!("{}", f.file_name().to_str().unwrap().trim()));
+    // dirs.par_iter()
+    // .for_each(|f| println!("{}", f.file_name().to_str().unwrap().trim()));
 
     // File print separator
-    println!("\n{}\n{}\n", "=".repeat(SEP_LEN), "=".repeat(SEP_LEN));
+    // println!("\n{}\n{}\n", "=".repeat(SEP_LEN), "=".repeat(SEP_LEN));
 
     // Iterate through every file and decode it
     dirs.par_iter().for_each(|dir| {
@@ -329,22 +341,34 @@ fn decode_files() {
             *cmp_dir_size.lock().unwrap() += 1;
 
             // Print the file information
-            println!(
-                "File: {}\nDirectory: {}\nSize: {} MB\n",
+            print!(
+                "
+                {}File:\t\t\t{}{}
+                {}Directory:\t\t{}{}
+                {}Size:\t\t\t{} MB{}
+                {}Finished Decoding:\t{} / {}{}
+                ",
+                // File Params
+                term_cursor::Goto(0, 18),
                 file_name,
+                " ".repeat(POST_MSG_REPLACE),
+                // Directory Params
+                term_cursor::Goto(0, 19),
                 file_name_path.replace(file_name, ""),
-                decoder.decoded_block.get_mut().len() as f32 / MB_SIZE as f32
-            );
-
-            // Print the completed decoding amount
-            println!(
-                "Finished Decoding:\t{} / {} Files",
+                " ".repeat(POST_MSG_REPLACE),
+                // Size Params
+                term_cursor::Goto(0, 20),
+                decoder.decoded_block.get_mut().len() as f32 / MB_SIZE as f32,
+                " ".repeat(POST_MSG_REPLACE),
+                // Finished Decoding Params
+                term_cursor::Goto(0, 21),
                 cmp_dir_size.lock().unwrap(),
-                dirs.len()
+                dirs.len(),
+                " ".repeat(POST_MSG_REPLACE),
             );
 
             // Decoding completion separator
-            println!("{}\n", "=".repeat(SEP_LEN));
+            // println!("{}{}\n", "=".repeat(SEP_LEN));
 
             // Create the bsp file
             let mut output = File::create(output_name_path).unwrap();
@@ -356,16 +380,48 @@ fn decode_files() {
     });
 }
 
+fn print_console_gui() {
+    print!("{}", term_cursor::Clear);
+
+    print!(
+        "
+        {}Searching All Paths
+        {}{}
+        {}Downloading Files
+        {}{}
+        {}Decoding All Files (bz2 -> original file)
+        {}{}
+        ",
+        // Checking All Paths
+        term_cursor::Goto((SEP_LEN / 8) as i32, 0),
+        term_cursor::Goto(0, 1),
+        "=".repeat(SEP_LEN),
+        // Downloading Files
+        term_cursor::Goto((SEP_LEN / 8) as i32, 7),
+        term_cursor::Goto(0, 8),
+        "=".repeat(SEP_LEN),
+        // Decoding All Files
+        term_cursor::Goto((SEP_LEN / 8) as i32, 15),
+        term_cursor::Goto(0, 16),
+        "=".repeat(SEP_LEN),
+    );
+}
+
 fn main() -> Result<()> {
     // TIMER START
     let timer = Instant::now();
+
+    // Prints a real-time readable console output
+    print_console_gui();
+
+    let url = r"https://fastdl.gflclan.com/cstrike/models/";
 
     // Parse through the Fastdl site
     // scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
 
     // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
     // let dl_links = scrapeweb(r"https://fastdl.gflclan.com/cstrike/materials/").unwrap();
-    let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/models/").unwrap();
+    let dl_links = scrape_web(url).unwrap();
     // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/resource/").unwrap();
     // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/sound/").unwrap();
     //let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/").unwrap();
@@ -378,9 +434,21 @@ fn main() -> Result<()> {
     // Then, the bz2 files are deleted, keeping only the bsp files
     decode_files();
 
-    println!("\n{}", "=".repeat(25));
-    println!("Time: {}", timer.elapsed().as_secs_f32());
-    println!("{}\n", "=".repeat(25));
+    println!(
+        "{}{}
+        {}URL:\t{}
+        {}Time:\t{}
+        {}{}",
+        // Separator Params
+        term_cursor::Goto(0, 23),
+        "=".repeat(25),
+        term_cursor::Goto(0, 24),
+        url,
+        term_cursor::Goto(0, 25),
+        timer.elapsed().as_secs_f32(),
+        term_cursor::Goto(0, 26),
+        "=".repeat(25)
+    );
     // TIMER END
 
     Ok(())
