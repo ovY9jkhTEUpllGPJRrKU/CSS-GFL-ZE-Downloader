@@ -1,6 +1,7 @@
 pub mod bz2_file;
 use error_chain::error_chain;
 use rayon::iter::*;
+use regex::Regex;
 use select::{document::Document, predicate::Name};
 use url::{Position, Url};
 use walkdir::{DirEntry, WalkDir};
@@ -9,7 +10,8 @@ use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File},
     io::Write,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, RwLock},
     time::Instant,
 };
 
@@ -37,13 +39,13 @@ fn get_base_url(url: &Url, doc: &Document) -> Result<Url> {
 ///
 /// # Arguments
 /// * `dl_url`      A &str which is the fastdl url
-fn scrape_web<'a>(dl_url: &str) -> Result<()> {
+fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
     println!("{}", term_cursor::Clear);
     println!("{}{}\n", term_cursor::Goto(0, 0), "=".repeat(SEP_LEN));
     println!("{}{}\n", term_cursor::Goto(0, 6), "=".repeat(SEP_LEN));
 
     // Store the links that will be downloaded
-    let download_links = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let download_links = Arc::new(RwLock::new(HashSet::<String>::new()));
     // Stores the links that were visited
     let visited_paths = Arc::new(Mutex::new(HashSet::<String>::new()));
     // Stores the paths that were not visited
@@ -181,16 +183,18 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
                         if !path.contains("gflfastdlv2") {
                             // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
                             new_paths_clone.lock().unwrap().push_front(path.to_string());
-                        } else {
+                        } else if path.contains("gflfastdlv2") && !path.ends_with("/") {
                             // Only add "fastdlv2" in our `download_links` Vec
-                            println!("{}{next_site}{}", term_cursor::Goto(0, 4), " ".repeat(30));
+                            // Second case ensures that the fastdlv2 directories are not being recursed as well
+                            // I'm not sure why there are links to the directories
+                            print!("{}{next_site}{}", term_cursor::Goto(0, 4), " ".repeat(70));
 
-                            download_links_clone.lock().unwrap().insert(next_site);
+                            download_links_clone.write().unwrap().insert(next_site);
 
                             println!(
                                 "{}Downloadable Links:\t{}",
                                 term_cursor::Goto(0, 3),
-                                download_links_clone.lock().unwrap().len()
+                                download_links_clone.write().unwrap().len()
                             );
                         }
                     }
@@ -216,10 +220,75 @@ fn scrape_web<'a>(dl_url: &str) -> Result<()> {
         }
     }
 
+    // println!("{}", term_cursor::Goto(0, 4));
     println!("{}{}", term_cursor::Goto(0, 4), " ".repeat(170));
     println!("{}", term_cursor::Goto(0, 8));
 
-    Ok(())
+    Ok(download_links)
+}
+
+fn download_files(dl_links: &Arc<RwLock<HashSet<String>>>) {
+    let idx = Mutex::new(0);
+    let curr_path = std::env::current_dir().unwrap();
+
+    // Force 2 threads on download
+    let visited_paths = Mutex::new(HashSet::<String>::new());
+
+    // Use regex to obtain the directory path and file name
+    let dl_url_paths = |dl_url: &str| -> (PathBuf, PathBuf) {
+        let re = Regex::new("(.+?)//(.+?)/(.*+)/(.*+)").unwrap();
+        let captures = re.captures(dl_url).unwrap();
+
+        let dir = &captures[3].replace("/", "\\");
+        let file = &captures[4];
+
+        let dir_path_str = format!("{}\\{}", curr_path.to_str().unwrap(), dir);
+        let dir_path = Path::new(dir_path_str.as_str());
+        let file_path_str = format!("{}\\{}", dir_path_str, file);
+        let file_path = Path::new(file_path_str.as_str());
+
+        (dir_path.to_path_buf(), file_path.to_path_buf())
+    };
+
+    // Iterate and get all the paths that are visited
+    dl_links.read().unwrap().par_iter().for_each(|dl_url| {
+        // TODO
+        let (dir_path, file_path) = dl_url_paths(dl_url);
+
+        // Recursively create directories to the folders we want to search
+
+        if !visited_paths
+            .lock()
+            .unwrap()
+            .insert(dir_path.to_str().unwrap().to_string())
+        {
+            std::fs::create_dir_all(dir_path).unwrap();
+        }
+    });
+
+    // Iterate and download all files with parallelization
+    dl_links.read().unwrap().par_iter().for_each(|dl_url| {
+        let (dir_path, file_path) = dl_url_paths(dl_url);
+
+        // Get request the file link and store it in the directory path
+        let bytes = reqwest::blocking::get(dl_url).unwrap().bytes().unwrap();
+
+        // Track our item amount (You can disable and it may improve runtime)
+        *idx.lock().unwrap() += 1;
+
+        println!(
+            "[ {} / {} ] Link:\t{}
+Capture:\t\t{}
+File:\t\t\t{}\n",
+            idx.lock().unwrap(),
+            dl_links.read().unwrap().len(),
+            dl_url,
+            file_path.to_str().unwrap(),
+            dir_path.to_str().unwrap()
+        );
+
+        File::create(file_path).unwrap().write_all(&bytes).unwrap();
+    });
 }
 
 fn decode_files() {
@@ -278,11 +347,11 @@ fn decode_files() {
             println!("{}\n", "=".repeat(SEP_LEN));
 
             // Create the bsp file
-            // let mut output = File::create(output_name_path).unwrap();
-            // output.write_all(&decoder.decoded_block.get_mut()).unwrap();
+            let mut output = File::create(output_name_path).unwrap();
+            output.write_all(&decoder.decoded_block.get_mut()).unwrap();
 
             // Delete the bz2 file
-            // fs::remove_file(file_name_path).unwrap();
+            fs::remove_file(file_name_path).unwrap();
         }
     });
 }
@@ -293,12 +362,17 @@ fn main() -> Result<()> {
 
     // Parse through the Fastdl site
     // scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
-    // scrape_web(r"https://fastdl.gflclan.com/cstrike/materials/").unwrap();
-    // scrape_web(r"https://fastdl.gflclan.com/cstrike/models/").unwrap();
-    // scrape_web(r"https://fastdl.gflclan.com/cstrike/resource/").unwrap();
-    // scrape_web(r"https://fastdl.gflclan.com/cstrike/sound/").unwrap();
-    scrape_web(r"https://fastdl.gflclan.com/cstrike/").unwrap();
-    // r"https://fastdl.gflclan.com/cstrike/";
+
+    // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
+    // let dl_links = scrapeweb(r"https://fastdl.gflclan.com/cstrike/materials/").unwrap();
+    let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/models/").unwrap();
+    // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/resource/").unwrap();
+    // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/sound/").unwrap();
+    //let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/").unwrap();
+    //let dl_links = r"https://fastdl.gflclan.com/cstrike/";
+
+    // Create directories for the files, then download and store them in their respective directories
+    download_files(&dl_links);
 
     // Grabs all the bz2 files and decodes them, making bsp files
     // Then, the bz2 files are deleted, keeping only the bsp files
