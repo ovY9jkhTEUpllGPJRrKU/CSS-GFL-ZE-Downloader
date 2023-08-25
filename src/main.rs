@@ -12,7 +12,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const KB_SIZE: usize = 1024;
@@ -112,7 +112,10 @@ fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
             // Get the `base_url` of `dl_url`
             let base_url = get_base_url(&dl_url, &temp_doc)?;
             // `head` is used to perform HEADER req
-            let head = reqwest::blocking::Client::new();
+            let head = reqwest::blocking::Client::builder()
+                .timeout(None)
+                .build()
+                .unwrap();
 
             // Create a thread for each path (file/dir) to visit
             let t = std::thread::spawn(move || {
@@ -183,13 +186,17 @@ fn scrape_web(dl_url: &str) -> Result<Arc<RwLock<HashSet<String>>>> {
                         && !path.contains(".tmp")
                         && !path.contains(".ztmp")
                     {
-                        if !path.contains(REDIRECT_LINK) {
+                        if !path.contains(REDIRECT_LINK) && !path.contains("maps/") {
                             // Do not add "fastdlv2" links - We don't want to recurse through fastdlv2
                             new_paths_clone.lock().unwrap().push_front(path.to_string());
-                        } else if path.contains(REDIRECT_LINK) && !path.ends_with("/") {
+                        } else if (path.contains(REDIRECT_LINK)
+                            && !path.ends_with("/")
+                            && !path.contains("maps/"))
+                            || (path.contains("maps/") && path.contains("ze_"))
+                        {
                             // Only add "fastdlv2" in our `download_links` Vec
                             // Second case ensures that the fastdlv2 directories are not being recursed as well
-                            // I'm not sure why there are links to the directories
+                            // I'm not sure why there are fastdlv2 directory links
                             print!(
                                 "{}{}{}",
                                 term_cursor::Goto(0, 5),
@@ -296,14 +303,26 @@ fn download_files(dl_links: &Arc<RwLock<HashSet<String>>>) {
         std::fs::create_dir_all(dir_path).unwrap();
 
         // Get request the file link and store it in the directory path
-        let bytes = reqwest::blocking::get(dl_url).unwrap().bytes().unwrap();
-        File::create(file_path).unwrap().write_all(&bytes).unwrap();
+        loop {
+            // If the request times out, send another request
+            if let Ok(response) = reqwest::blocking::get(dl_url) {
+                if let Ok(file_bytes) = response.bytes() {
+                    File::create(file_path)
+                        .unwrap()
+                        .write_all(&file_bytes)
+                        .unwrap();
+                    break;
+                }
+            }
+
+            std::thread::sleep(Duration::from_secs(1));
+        }
     });
 }
 
 /// Decodes all bz2 files in the current directory by recursively searching through all the paths
 /// After all paths are decoded, the original bz2 files are deleted
-fn decode_files() {
+fn decode_files(corrupt_files: &Mutex<HashSet<String>>) {
     // Recursively collect files ending with .bz2
     let dirs = WalkDir::new(".")
         .into_iter()
@@ -335,7 +354,14 @@ fn decode_files() {
         if let Ok(f) = File::open(dir.path()) {
             // Create the decoder (converts bz2 to bsp)
             let mut decoder = bz2_file::BZ2File::new(f);
-            decoder.decode_block();
+
+            match decoder.decode_block() {
+                Ok(_) => {}
+                _ => {
+                    corrupt_files.lock().unwrap().insert(file_name.to_string());
+                    return;
+                }
+            }
 
             // Increment the compared value (for status checking)
             *cmp_dir_size.lock().unwrap() += 1;
@@ -372,7 +398,13 @@ fn decode_files() {
 
             // Create the bsp file
             let mut output = File::create(output_name_path).unwrap();
-            output.write_all(&decoder.decoded_block.get_mut()).unwrap();
+
+            if let Err(_) = output.write_all(&decoder.decoded_block.get_mut()) {
+                corrupt_files
+                    .lock()
+                    .unwrap()
+                    .insert(format!("{}", file_name_path.to_string(),));
+            }
 
             // Delete the bz2 file
             fs::remove_file(file_name_path).unwrap();
@@ -410,45 +442,72 @@ fn print_console_gui() {
 fn main() -> Result<()> {
     // TIMER START
     let timer = Instant::now();
+    let corrupt_files = Mutex::new(HashSet::<String>::new());
 
     // Prints a real-time readable console output
     print_console_gui();
 
-    let url = r"https://fastdl.gflclan.com/cstrike/models/";
+    // TODO: Add support for ze_* maps
+    // CS:S
+    let mut fastdl_urls = Vec::<&str>::new();
+    // let fastdl_urls = Vec::with_capacity(5);
+    fastdl_urls.push("https://fastdl.gflclan.com/cstrike/maps/");
+    // let url = r"https://fastdl.gflclan.com/cstrike/materials/";
+    // let url = r"https://fastdl.gflclan.com/cstrike/models/";
+    // let url = r"https://fastdl.gflclan.com/cstrike/resource/";
+    // let url = r"https://fastdl.gflclan.com/cstrike/sound/";
+    // let url = r"https://fastdl.gflclan.com/cstrike/";
+
+    // CSGO
+    // let url = r"https://fastdl.gflclan.com/csgo/maps/";
+    // let url = r"https://fastdl.gflclan.com/csgo/materials/";
+    // let url = r"https://fastdl.gflclan.com/csgo/models/";
+    // let url = r"https://fastdl.gflclan.com/csgo/resource/";
+    // let url = r"https://fastdl.gflclan.com/csgo/sound/";
+    // let url = r"https://fastdl.gflclan.com/csgo/";
 
     // Parse through the Fastdl site
     // scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
 
-    // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
-    // let dl_links = scrapeweb(r"https://fastdl.gflclan.com/cstrike/materials/").unwrap();
-    let dl_links = scrape_web(url).unwrap();
-    // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/resource/").unwrap();
-    // let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/sound/").unwrap();
-    //let dl_links = scrape_web(r"https://fastdl.gflclan.com/cstrike/").unwrap();
-    //let dl_links = r"https://fastdl.gflclan.com/cstrike/";
+    for url in fastdl_urls.to_owned() {
+        let dl_links = scrape_web(url).unwrap();
 
-    // Create directories for the files, then download and store them in their respective directories
-    download_files(&dl_links);
+        // Create directories for the files, then download and store them in their respective directories
+        download_files(&dl_links);
 
-    // Grabs all the bz2 files and decodes them, making bsp files
-    // Then, the bz2 files are deleted, keeping only the bsp files
-    decode_files();
+        // Grabs all the bz2 files and decodes them, making bsp files
+        // Then, the bz2 files are deleted, keeping only the bsp files
+        decode_files(&corrupt_files);
+    }
 
     println!(
         "{}{}
-        {}URL:\t{}
+        {}URL:\t{:?}
         {}Time:\t{}
         {}{}",
         // Separator Params
         term_cursor::Goto(0, 23),
         "=".repeat(25),
+        // URL
         term_cursor::Goto(0, 24),
-        url,
+        fastdl_urls,
+        // Time
         term_cursor::Goto(0, 25),
         timer.elapsed().as_secs_f32(),
+        // Separator
         term_cursor::Goto(0, 26),
         "=".repeat(25)
     );
+
+    print!(
+        "{}Files that failed to decompress correctly: {:#?}{}",
+        term_cursor::Goto(0, 28),
+        corrupt_files.lock().unwrap(),
+        term_cursor::Goto(0, 35),
+    );
+    // for corr_f in corrupt_files.lock().unwrap().iter() {
+    // println!("{}", corr_f);
+    // }
     // TIMER END
 
     Ok(())

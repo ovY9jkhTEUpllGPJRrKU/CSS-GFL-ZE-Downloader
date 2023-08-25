@@ -1,5 +1,5 @@
 use bzip2::read::MultiBzDecoder;
-use std::{cell::Cell, fs::File, io::Read};
+use std::{cell::Cell, error::Error, fs::File, io::Read};
 
 /// BZ2File stores the BZDecoder which will decode the original file
 pub struct BZ2File {
@@ -22,13 +22,13 @@ impl BZ2File {
     }
 
     /// Decodes the file, Writes into the `decoded_block` Vec, and Returns a reference to that Vec
-    pub fn decode_block(self: &mut Self) -> &mut Vec<u8> {
+    pub fn decode_block(self: &mut Self) -> Result<&mut Vec<u8>, Box<dyn Error>> {
         // Decodes the block of data from the bz2 file
         self.decoder
             .get_mut()
-            .read_to_end(self.decoded_block.get_mut())
-            .unwrap();
+            .read_to_end(self.decoded_block.get_mut())?;
 
-        return self.decoded_block.get_mut();
+        return Ok(self.decoded_block.get_mut());
+        // return self.decoded_block.get_mut();
     }
 }
