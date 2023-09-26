@@ -9,7 +9,7 @@ use walkdir::{DirEntry, WalkDir};
 use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File},
-    io::Write,
+    io::{self, stdin, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
@@ -451,23 +451,12 @@ fn main() -> Result<()> {
     // CS:S
     let mut fastdl_urls = Vec::<&str>::new();
     // let fastdl_urls = Vec::with_capacity(5);
-    fastdl_urls.push("https://fastdl.gflclan.com/cstrike/maps/");
-    // let url = r"https://fastdl.gflclan.com/cstrike/materials/";
-    // let url = r"https://fastdl.gflclan.com/cstrike/models/";
-    // let url = r"https://fastdl.gflclan.com/cstrike/resource/";
-    // let url = r"https://fastdl.gflclan.com/cstrike/sound/";
-    // let url = r"https://fastdl.gflclan.com/cstrike/";
-
-    // CSGO
-    // let url = r"https://fastdl.gflclan.com/csgo/maps/";
-    // let url = r"https://fastdl.gflclan.com/csgo/materials/";
-    // let url = r"https://fastdl.gflclan.com/csgo/models/";
-    // let url = r"https://fastdl.gflclan.com/csgo/resource/";
-    // let url = r"https://fastdl.gflclan.com/csgo/sound/";
-    // let url = r"https://fastdl.gflclan.com/csgo/";
-
-    // Parse through the Fastdl site
-    // scrape_web(r"https://fastdl.gflclan.com/cstrike/maps/").unwrap();
+    // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/maps/");
+    // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/materials/");
+    // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/models/");
+    // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/resource/");
+    fastdl_urls.push("https://fastdl.gflclan.com/cstrike/sound/");
+    // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/");
 
     for url in fastdl_urls.to_owned() {
         let dl_links = scrape_web(url).unwrap();
@@ -482,7 +471,7 @@ fn main() -> Result<()> {
 
     println!(
         "{}{}
-        {}URL:\t{:?}
+        {}URL:\t{:#?}
         {}Time:\t{}
         {}{}",
         // Separator Params
@@ -505,6 +494,13 @@ fn main() -> Result<()> {
         corrupt_files.lock().unwrap(),
         term_cursor::Goto(0, 35),
     );
+
+    // User Input to confirm that all maps are downloaded/extracted
+    print!("{}Press Enter to exit...", term_cursor::Goto(0, 42));
+    Write::flush(&mut io::stdout()).expect("Failed to flush the ");
+
+    stdin().read(&mut [0]).unwrap();
+
     // for corr_f in corrupt_files.lock().unwrap().iter() {
     // println!("{}", corr_f);
     // }
