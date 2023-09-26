@@ -451,11 +451,11 @@ fn main() -> Result<()> {
     // CS:S
     let mut fastdl_urls = Vec::<&str>::new();
     // let fastdl_urls = Vec::with_capacity(5);
-    // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/maps/");
+    fastdl_urls.push("https://fastdl.gflclan.com/cstrike/maps/");
     // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/materials/");
     // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/models/");
     // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/resource/");
-    fastdl_urls.push("https://fastdl.gflclan.com/cstrike/sound/");
+    // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/sound/");
     // fastdl_urls.push("https://fastdl.gflclan.com/cstrike/");
 
     for url in fastdl_urls.to_owned() {
